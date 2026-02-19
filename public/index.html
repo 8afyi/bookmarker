@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bookmarker</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section id="loginView" class="card auth-card">
+        <h1>Bookmarker</h1>
+        <p>Enter your password to continue.</p>
+        <form id="loginForm">
+          <input id="password" name="password" type="password" required placeholder="Password" />
+          <button type="submit">Log In</button>
+        </form>
+        <p id="loginError" class="error"></p>
+      </section>
+
+      <section id="appView" class="hidden app-shell">
+        <header class="topbar card">
+          <h1>Bookmarker</h1>
+          <button id="logoutBtn" class="secondary">Log Out</button>
+        </header>
+
+        <section class="card panel-grid">
+          <div>
+            <h2>Add Bookmark</h2>
+            <form id="bookmarkForm" class="bookmark-form">
+              <input id="url" name="url" type="url" required placeholder="https://example.com" />
+              <input id="tags" name="tags" type="text" placeholder="tags, comma, separated" />
+              <select id="listSelect" name="listId"></select>
+              <button type="submit">Add Bookmark</button>
+            </form>
+            <p id="bookmarkError" class="error"></p>
+          </div>
+
+          <div>
+            <h2>Create List</h2>
+            <form id="listForm" class="list-form">
+              <input id="listName" name="name" type="text" required placeholder="List name" maxlength="80" />
+              <button type="submit">Create List</button>
+            </form>
+            <p id="listError" class="error"></p>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="toolbar">
+            <label>
+              Filter by tag:
+              <input id="tagFilter" type="text" placeholder="e.g. work" />
+            </label>
+            <label class="checkbox-wrap">
+              <input id="favoritesOnly" type="checkbox" />
+              Favorites only
+            </label>
+            <label>
+              Sort:
+              <select id="sortMode">
+                <option value="manual">Manual</option>
+                <option value="tag">Tag</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section id="listsGrid" class="lists-grid"></section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

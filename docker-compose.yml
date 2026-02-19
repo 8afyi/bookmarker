@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - APP_PASSWORD=${APP_PASSWORD}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - DB_PATH=/data/bookmarks.db
+      - PORT=3000
+    volumes:
+      - bookmarks_data:/data
+    restart: unless-stopped
+
+volumes:
+  bookmarks_data:
