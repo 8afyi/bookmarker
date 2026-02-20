@@ -32,6 +32,6 @@ APP_PASSWORD=your-password SESSION_SECRET=your-secret npm start
 ## Notes
 
 - Uses SQLite (`bookmarks.db`) for persistence.
-- In Docker, DB is stored in volume `bookmarks_data`.
+- In Docker, DB is stored at `./data/bookmarks.db` on the host.
 - Default list is `General`.
 - This app is intended for single-user/self-hosted usage.

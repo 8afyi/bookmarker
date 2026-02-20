@@ -10,8 +10,5 @@ services:
       - DB_PATH=/data/bookmarks.db
       - PORT=3000
     volumes:
-      - bookmarks_data:/data
+      - ./data:/data
     restart: unless-stopped
-
-volumes:
-  bookmarks_data:
