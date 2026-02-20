@@ -21,11 +21,73 @@ const listSelect = document.getElementById("listSelect");
 
 let bookmarks = [];
 let lists = [];
+let dragState = null;
+
+const dropPlaceholder = document.createElement("li");
+dropPlaceholder.className = "drop-placeholder";
+dropPlaceholder.textContent = "Drop bookmark here";
 
 function showView(view) {
   setupView.classList.toggle("hidden", view !== "setup");
   loginView.classList.toggle("hidden", view !== "login");
   appView.classList.toggle("hidden", view !== "app");
+}
+
+function isManualSortMode() {
+  return sortMode.value === "manual";
+}
+
+function clearDropVisuals() {
+  if (dropPlaceholder.parentElement) {
+    dropPlaceholder.remove();
+  }
+
+  document.querySelectorAll(".list-card.drag-over").forEach((card) => {
+    card.classList.remove("drag-over");
+  });
+
+  document.querySelectorAll(".bookmark-item.dragging").forEach((item) => {
+    item.classList.remove("dragging");
+  });
+
+  document.querySelectorAll(".bookmark-list").forEach((listEl) => {
+    if (!listEl.querySelector(".bookmark-item") && !listEl.querySelector(".empty-note")) {
+      const note = document.createElement("li");
+      note.className = "empty-note";
+      note.textContent = "No bookmarks in this list.";
+      listEl.appendChild(note);
+    }
+  });
+}
+
+function resetDragState() {
+  dragState = null;
+  clearDropVisuals();
+}
+
+function getDropBeforeElement(listEl, mouseY) {
+  const items = [...listEl.querySelectorAll(".bookmark-item:not(.dragging)")];
+  let closestOffset = Number.NEGATIVE_INFINITY;
+  let closestElement = null;
+
+  items.forEach((item) => {
+    const rect = item.getBoundingClientRect();
+    const offset = mouseY - rect.top - rect.height / 2;
+    if (offset < 0 && offset > closestOffset) {
+      closestOffset = offset;
+      closestElement = item;
+    }
+  });
+
+  return closestElement;
+}
+
+function updateDropTarget(listEl, beforeEl) {
+  const listId = Number(listEl.dataset.listId || 0);
+  if (!dragState || !listId) return;
+
+  dragState.targetListId = listId;
+  dragState.beforeId = beforeEl ? Number(beforeEl.dataset.id || 0) : null;
 }
 
 function formatDate(iso) {
@@ -133,6 +195,7 @@ function renderBookmarks() {
   lists.forEach((list) => {
     const card = document.createElement("article");
     card.className = "list-card";
+    const dragEnabled = isManualSortMode();
 
     const listItems = sortBookmarks(visible.filter((b) => b.listId === list.id));
 
@@ -150,7 +213,7 @@ function renderBookmarks() {
           : '<div class="bookmark-icon"></div>';
 
         return `
-          <li class="bookmark-item">
+          <li class="bookmark-item ${dragEnabled ? "draggable" : "drag-disabled"}" data-id="${bookmark.id}" data-list-id="${list.id}" draggable="${dragEnabled ? "true" : "false"}">
             ${icon}
             <div class="bookmark-main">
               <a href="${escapeHtml(bookmark.url)}" target="_blank" rel="noreferrer">${escapeHtml(bookmark.title)}</a>
@@ -176,7 +239,7 @@ function renderBookmarks() {
         <h3>${escapeHtml(list.name)}</h3>
         <small>${listItems.length} items</small>
       </header>
-      <ul class="bookmark-list">
+      <ul class="bookmark-list" data-list-id="${list.id}">
         ${listItems.length ? listHtml : '<li class="empty-note">No bookmarks in this list.</li>'}
       </ul>
     `;
@@ -357,14 +420,127 @@ listsGrid.addEventListener("click", async (event) => {
   }
 });
 
+listsGrid.addEventListener("dragstart", (event) => {
+  if (!isManualSortMode()) {
+    event.preventDefault();
+    return;
+  }
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const item = target.closest(".bookmark-item");
+  if (!item) return;
+
+  const bookmarkId = Number(item.dataset.id || 0);
+  const sourceListId = Number(item.dataset.listId || 0);
+  if (!bookmarkId || !sourceListId) {
+    event.preventDefault();
+    return;
+  }
+
+  dragState = {
+    bookmarkId,
+    sourceListId,
+    targetListId: sourceListId,
+    beforeId: null
+  };
+
+  item.classList.add("dragging");
+
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(bookmarkId));
+  }
+});
+
+listsGrid.addEventListener("dragover", (event) => {
+  if (!dragState || !isManualSortMode()) return;
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const listEl = target.closest(".bookmark-list");
+  if (!listEl) return;
+
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  listEl.querySelectorAll(".empty-note").forEach((node) => node.remove());
+
+  const card = listEl.closest(".list-card");
+  document.querySelectorAll(".list-card.drag-over").forEach((active) => {
+    if (active !== card) active.classList.remove("drag-over");
+  });
+  if (card) card.classList.add("drag-over");
+
+  const beforeEl = getDropBeforeElement(listEl, event.clientY);
+  if (beforeEl) {
+    listEl.insertBefore(dropPlaceholder, beforeEl);
+  } else {
+    listEl.appendChild(dropPlaceholder);
+  }
+  updateDropTarget(listEl, beforeEl);
+});
+
+listsGrid.addEventListener("drop", async (event) => {
+  if (!dragState || !isManualSortMode()) return;
+
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    resetDragState();
+    return;
+  }
+
+  const listEl = target.closest(".bookmark-list");
+  if (!listEl) {
+    resetDragState();
+    return;
+  }
+
+  event.preventDefault();
+
+  const fallbackListId = Number(listEl.dataset.listId || 0);
+  const listId = dragState.targetListId || fallbackListId;
+  if (!listId) {
+    resetDragState();
+    return;
+  }
+
+  bookmarkError.textContent = "";
+
+  try {
+    await api(`/api/bookmarks/${dragState.bookmarkId}/reorder`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        listId,
+        beforeId: dragState.beforeId || null
+      })
+    });
+    await refreshData();
+  } catch (error) {
+    bookmarkError.textContent = error.message;
+  } finally {
+    resetDragState();
+  }
+});
+
+listsGrid.addEventListener("dragend", () => {
+  resetDragState();
+});
+
 tagFilter.addEventListener("input", renderBookmarks);
 favoritesOnly.addEventListener("change", renderBookmarks);
-sortMode.addEventListener("change", renderBookmarks);
+sortMode.addEventListener("change", () => {
+  resetDragState();
+  renderBookmarks();
+});
 
 logoutBtn.addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
   bookmarks = [];
   lists = [];
+  resetDragState();
   renderBookmarks();
   await checkSession();
 });

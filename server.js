@@ -923,6 +923,93 @@ app.patch("/api/bookmarks/:id/list", requireAuth, (req, res) => {
   return res.json({ bookmark: updated });
 });
 
+app.patch("/api/bookmarks/:id/reorder", requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const listId = Number(req.body.listId || 0);
+  const beforeIdRaw = req.body.beforeId;
+  const beforeId =
+    beforeIdRaw === null || beforeIdRaw === undefined || beforeIdRaw === ""
+      ? null
+      : Number(beforeIdRaw);
+
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: "Invalid bookmark id" });
+  }
+
+  if (!Number.isInteger(listId) || listId <= 0) {
+    return res.status(400).json({ error: "Invalid list" });
+  }
+
+  if (beforeId !== null && (!Number.isInteger(beforeId) || beforeId <= 0)) {
+    return res.status(400).json({ error: "Invalid target position" });
+  }
+
+  const existing = getBookmarkStmt.get(id);
+  if (!existing) {
+    return res.status(404).json({ error: "Bookmark not found" });
+  }
+
+  const targetList = getListStmt.get(listId);
+  if (!targetList) {
+    return res.status(400).json({ error: "Invalid list" });
+  }
+
+  const sourceOrder = listBookmarksByListStmt.all(existing.listId).map((row) => row.id);
+  const targetSeed =
+    existing.listId === listId
+      ? sourceOrder
+      : listBookmarksByListStmt.all(listId).map((row) => row.id);
+
+  const sourceWithout = sourceOrder.filter((bookmarkId) => bookmarkId !== id);
+  const targetWithout =
+    existing.listId === listId
+      ? sourceWithout
+      : targetSeed.filter((bookmarkId) => bookmarkId !== id);
+
+  if (beforeId !== null && beforeId === id) {
+    return res.json({ bookmark: decryptBookmarkRow(existing, req.dataKey), unchanged: true });
+  }
+
+  let insertIndex = targetWithout.length;
+  if (beforeId !== null) {
+    insertIndex = targetWithout.indexOf(beforeId);
+    if (insertIndex === -1) {
+      return res.status(400).json({ error: "Invalid target position" });
+    }
+  }
+
+  const targetOrder = [...targetWithout];
+  targetOrder.splice(insertIndex, 0, id);
+
+  const unchanged =
+    existing.listId === listId &&
+    sourceOrder.length === targetOrder.length &&
+    sourceOrder.every((bookmarkId, index) => bookmarkId === targetOrder[index]);
+  if (unchanged) {
+    return res.json({ bookmark: decryptBookmarkRow(existing, req.dataKey), unchanged: true });
+  }
+
+  const txn = db.transaction(() => {
+    if (existing.listId !== listId) {
+      updateBookmarkListStmt.run(listId, 0, id);
+    }
+
+    for (let i = 0; i < targetOrder.length; i += 1) {
+      updateBookmarkPositionStmt.run(i + 1, targetOrder[i]);
+    }
+
+    if (existing.listId !== listId) {
+      for (let i = 0; i < sourceWithout.length; i += 1) {
+        updateBookmarkPositionStmt.run(i + 1, sourceWithout[i]);
+      }
+    }
+  });
+
+  txn();
+  const updated = decryptBookmarkRow(getBookmarkStmt.get(id), req.dataKey);
+  return res.json({ bookmark: updated });
+});
+
 app.patch("/api/bookmarks/:id/move", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   const direction = String(req.body.direction || "").toLowerCase();
