@@ -1,3 +1,5 @@
+[Screen shot](bookmarker.png)
+
 1. Create env file:
    ```bash
    cp .env.example .env
