@@ -3,11 +3,23 @@ services:
   app:
     build: .
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
       - SESSION_SECRET=${SESSION_SECRET}
-      - DB_PATH=/data/bookmarks.db
-      - PORT=3000
+      - NODE_ENV=${NODE_ENV:-development}
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-3000}
+      - DB_PATH=${DB_PATH:-/data/bookmarks.db}
+      - SESSION_MAX_AGE_MS=${SESSION_MAX_AGE_MS:-43200000}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
+      - TRUST_PROXY=${TRUST_PROXY:-}
+      - PASSWORD_MIN_LENGTH=${PASSWORD_MIN_LENGTH:-12}
+      - LOGIN_RATE_LIMIT_WINDOW_MS=${LOGIN_RATE_LIMIT_WINDOW_MS:-900000}
+      - LOGIN_RATE_LIMIT_MAX=${LOGIN_RATE_LIMIT_MAX:-10}
+      - LOGIN_LOCKOUT_THRESHOLD=${LOGIN_LOCKOUT_THRESHOLD:-5}
+      - LOGIN_LOCKOUT_MS=${LOGIN_LOCKOUT_MS:-900000}
+      - FETCH_TIMEOUT_MS=${FETCH_TIMEOUT_MS:-8000}
+      - FETCH_BLOCK_PRIVATE_IPS=${FETCH_BLOCK_PRIVATE_IPS:-true}
     volumes:
       - ./data:/data
     restart: unless-stopped
