@@ -1,11 +1,17 @@
+const setupView = document.getElementById("setupView");
 const loginView = document.getElementById("loginView");
 const appView = document.getElementById("appView");
+
+const setupForm = document.getElementById("setupForm");
 const loginForm = document.getElementById("loginForm");
 const bookmarkForm = document.getElementById("bookmarkForm");
 const listForm = document.getElementById("listForm");
+
+const setupError = document.getElementById("setupError");
 const loginError = document.getElementById("loginError");
 const bookmarkError = document.getElementById("bookmarkError");
 const listError = document.getElementById("listError");
+
 const tagFilter = document.getElementById("tagFilter");
 const sortMode = document.getElementById("sortMode");
 const favoritesOnly = document.getElementById("favoritesOnly");
@@ -15,6 +21,12 @@ const listSelect = document.getElementById("listSelect");
 
 let bookmarks = [];
 let lists = [];
+
+function showView(view) {
+  setupView.classList.toggle("hidden", view !== "setup");
+  loginView.classList.toggle("hidden", view !== "login");
+  appView.classList.toggle("hidden", view !== "app");
+}
 
 function formatDate(iso) {
   const date = new Date(iso);
@@ -183,16 +195,50 @@ async function refreshData() {
 
 async function checkSession() {
   const result = await api("/api/session");
-  if (!result.authenticated) return;
+  if (result.authenticated) {
+    showView("app");
+    await refreshData();
+    return;
+  }
 
-  loginView.classList.add("hidden");
-  appView.classList.remove("hidden");
-  await refreshData();
+  if (result.setupRequired) {
+    showView("setup");
+    return;
+  }
+
+  showView("login");
 }
+
+setupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setupError.textContent = "";
+  loginError.textContent = "";
+
+  const password = document.getElementById("setupPassword").value;
+  const confirmPassword = document.getElementById("setupPasswordConfirm").value;
+
+  if (password !== confirmPassword) {
+    setupError.textContent = "Passwords do not match";
+    return;
+  }
+
+  try {
+    await api("/api/setup", {
+      method: "POST",
+      body: JSON.stringify({ password })
+    });
+    setupForm.reset();
+    showView("app");
+    await refreshData();
+  } catch (error) {
+    setupError.textContent = error.message;
+  }
+});
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   loginError.textContent = "";
+  setupError.textContent = "";
 
   const password = document.getElementById("password").value;
 
@@ -202,10 +248,13 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password })
     });
     loginForm.reset();
-    loginView.classList.add("hidden");
-    appView.classList.remove("hidden");
+    showView("app");
     await refreshData();
   } catch (error) {
+    if (error.message === "Setup required") {
+      showView("setup");
+      return;
+    }
     loginError.textContent = error.message;
   }
 });
@@ -314,13 +363,12 @@ sortMode.addEventListener("change", renderBookmarks);
 
 logoutBtn.addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
-  appView.classList.add("hidden");
-  loginView.classList.remove("hidden");
   bookmarks = [];
   lists = [];
   renderBookmarks();
+  await checkSession();
 });
 
 checkSession().catch(() => {
-  // Not logged in.
+  showView("login");
 });

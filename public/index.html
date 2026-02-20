@@ -8,6 +8,17 @@
   </head>
   <body>
     <main class="container">
+      <section id="setupView" class="card auth-card hidden">
+        <h1>Bookmarker Setup</h1>
+        <p>Create a master password. It will unlock and encrypt your bookmark data.</p>
+        <form id="setupForm">
+          <input id="setupPassword" name="setupPassword" type="password" required minlength="12" placeholder="New password (12+ chars)" />
+          <input id="setupPasswordConfirm" name="setupPasswordConfirm" type="password" required minlength="12" placeholder="Confirm password" />
+          <button type="submit">Create Password</button>
+        </form>
+        <p id="setupError" class="error"></p>
+      </section>
+
       <section id="loginView" class="card auth-card">
         <h1>Bookmarker</h1>
         <p>Enter your password to continue.</p>

@@ -1,4 +1,5 @@
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
 const Database = require("better-sqlite3");
@@ -7,13 +8,16 @@ const cheerio = require("cheerio");
 const app = express();
 
 const PORT = Number(process.env.PORT || 3000);
-const APP_PASSWORD = process.env.APP_PASSWORD;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "bookmarks.db");
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
-if (!APP_PASSWORD) {
-  console.error("APP_PASSWORD environment variable is required.");
-  process.exit(1);
+const PASSWORD_MIN_LENGTH = 12;
+const DATA_KEY_LENGTH = 32;
+const ENCRYPTED_PREFIX = "enc.v1";
+
+if (SESSION_SECRET === "change-me") {
+  console.warn("SESSION_SECRET is using the default value. Set a strong random secret.");
 }
 
 const db = new Database(DB_PATH);
@@ -38,6 +42,15 @@ db.exec(`
     list_id INTEGER,
     FOREIGN KEY (list_id) REFERENCES lists(id)
   );
+
+  CREATE TABLE IF NOT EXISTS auth_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    encryption_salt TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 const bookmarkColumns = db.prepare("PRAGMA table_info(bookmarks)").all();
@@ -45,16 +58,26 @@ if (!bookmarkColumns.some((col) => col.name === "list_id")) {
   db.exec("ALTER TABLE bookmarks ADD COLUMN list_id INTEGER");
 }
 
-const getListByNameStmt = db.prepare("SELECT id, name, position FROM lists WHERE name = ?");
+const getAuthConfigStmt = db.prepare(
+  `SELECT password_salt AS passwordSalt, password_hash AS passwordHash, encryption_salt AS encryptionSalt
+   FROM auth_config
+   WHERE id = 1`
+);
+const insertAuthConfigStmt = db.prepare(
+  `INSERT INTO auth_config (id, password_salt, password_hash, encryption_salt, created_at, updated_at)
+   VALUES (1, @passwordSalt, @passwordHash, @encryptionSalt, @createdAt, @updatedAt)`
+);
+
+const getAnyListStmt = db.prepare("SELECT id FROM lists ORDER BY position ASC, id ASC LIMIT 1");
 const getMaxListPositionStmt = db.prepare("SELECT COALESCE(MAX(position), 0) AS maxPos FROM lists");
 const insertListStmt = db.prepare("INSERT INTO lists (name, position) VALUES (?, ?)");
 const listListsStmt = db.prepare("SELECT id, name, position FROM lists ORDER BY position ASC, id ASC");
+const getListStmt = db.prepare("SELECT id, name, position FROM lists WHERE id = ?");
 
 function ensureDefaultList() {
-  const existing = getListByNameStmt.get("General");
+  const existing = getAnyListStmt.get();
   if (existing) return existing.id;
-  const maxPos = getMaxListPositionStmt.get().maxPos;
-  const result = insertListStmt.run("General", maxPos + 1);
+  const result = insertListStmt.run("General", 1);
   return Number(result.lastInsertRowid);
 }
 
@@ -76,7 +99,7 @@ const listBookmarksStmt = db.prepare(
    ORDER BY l.position ASC, b.position ASC, b.id ASC`
 );
 const listBookmarksByListStmt = db.prepare(
-  `SELECT id, position FROM bookmarks WHERE list_id = ? ORDER BY position ASC, id ASC`
+  "SELECT id, position FROM bookmarks WHERE list_id = ? ORDER BY position ASC, id ASC"
 );
 const getBookmarkStmt = db.prepare(
   `SELECT b.id, b.url, b.title, b.favicon, b.tags, b.is_favorite AS isFavorite,
@@ -85,36 +108,209 @@ const getBookmarkStmt = db.prepare(
    JOIN lists l ON l.id = b.list_id
    WHERE b.id = ?`
 );
-const getListStmt = db.prepare("SELECT id, name, position FROM lists WHERE id = ?");
+const listRawListsStmt = db.prepare("SELECT id, name FROM lists ORDER BY id ASC");
+const listRawBookmarksStmt = db.prepare(
+  "SELECT id, url, title, favicon, tags, created_at AS createdAt FROM bookmarks ORDER BY id ASC"
+);
+const updateListNameStmt = db.prepare("UPDATE lists SET name = ? WHERE id = ?");
 const updateFavoriteStmt = db.prepare("UPDATE bookmarks SET is_favorite = ? WHERE id = ?");
 const updateTagsStmt = db.prepare("UPDATE bookmarks SET tags = ? WHERE id = ?");
 const updateBookmarkPositionStmt = db.prepare("UPDATE bookmarks SET position = ? WHERE id = ?");
 const updateBookmarkListStmt = db.prepare("UPDATE bookmarks SET list_id = ?, position = ? WHERE id = ?");
+const updateBookmarkFieldsStmt = db.prepare(
+  "UPDATE bookmarks SET url = ?, title = ?, favicon = ?, tags = ?, created_at = ? WHERE id = ?"
+);
 const deleteBookmarkStmt = db.prepare("DELETE FROM bookmarks WHERE id = ?");
 const shiftDownStmt = db.prepare(
   "UPDATE bookmarks SET position = position - 1 WHERE list_id = ? AND position > ?"
 );
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: false
+function b64Encode(input) {
+  return Buffer.from(input).toString("base64");
+}
+
+function b64Decode(input) {
+  return Buffer.from(String(input || ""), "base64");
+}
+
+function deriveScrypt(password, saltBuffer, keyLength = DATA_KEY_LENGTH) {
+  return crypto.scryptSync(password, saltBuffer, keyLength, {
+    N: 16384,
+    r: 8,
+    p: 1,
+    maxmem: 64 * 1024 * 1024
+  });
+}
+
+function createPasswordRecord(password) {
+  const passwordSalt = crypto.randomBytes(16);
+  const encryptionSalt = crypto.randomBytes(16);
+  const passwordHash = deriveScrypt(password, passwordSalt, DATA_KEY_LENGTH);
+
+  return {
+    passwordSalt: b64Encode(passwordSalt),
+    passwordHash: b64Encode(passwordHash),
+    encryptionSalt: b64Encode(encryptionSalt)
+  };
+}
+
+function verifyPassword(password, authConfig) {
+  try {
+    const derived = deriveScrypt(password, b64Decode(authConfig.passwordSalt), DATA_KEY_LENGTH);
+    const expected = b64Decode(authConfig.passwordHash);
+    return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
+function deriveDataKey(password, encryptionSalt) {
+  return deriveScrypt(password, b64Decode(encryptionSalt), DATA_KEY_LENGTH);
+}
+
+function isEncryptedValue(value) {
+  return typeof value === "string" && value.startsWith(`${ENCRYPTED_PREFIX}:`);
+}
+
+function encryptText(plaintext, dataKey) {
+  const value = String(plaintext || "");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", dataKey, iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${ENCRYPTED_PREFIX}:${b64Encode(iv)}:${b64Encode(tag)}:${b64Encode(encrypted)}`;
+}
+
+function decryptText(ciphertext, dataKey) {
+  const value = String(ciphertext || "");
+  if (!isEncryptedValue(value)) {
+    return value;
+  }
+
+  const parts = value.split(":");
+  if (parts.length !== 4 || parts[0] !== ENCRYPTED_PREFIX) {
+    throw new Error("Corrupt encrypted data");
+  }
+
+  const iv = b64Decode(parts[1]);
+  const tag = b64Decode(parts[2]);
+  const payload = b64Decode(parts[3]);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", dataKey, iv);
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([decipher.update(payload), decipher.final()]);
+  return decrypted.toString("utf8");
+}
+
+function decryptBookmarkRow(row, dataKey) {
+  const decrypted = {
+    ...row,
+    url: decryptText(row.url, dataKey),
+    title: decryptText(row.title, dataKey),
+    favicon: decryptText(row.favicon, dataKey),
+    tags: decryptText(row.tags, dataKey),
+    createdAt: decryptText(row.createdAt, dataKey)
+  };
+
+  if (Object.prototype.hasOwnProperty.call(row, "listName")) {
+    decrypted.listName = decryptText(row.listName, dataKey);
+  }
+
+  return decrypted;
+}
+
+function decryptListRow(row, dataKey) {
+  return {
+    ...row,
+    name: decryptText(row.name, dataKey)
+  };
+}
+
+function migratePlaintextLists(dataKey) {
+  const rows = listRawListsStmt.all();
+  const toUpdate = rows.filter((row) => !isEncryptedValue(row.name));
+
+  if (!toUpdate.length) return 0;
+
+  const txn = db.transaction((items) => {
+    for (const row of items) {
+      const nextName = encryptText(row.name, dataKey);
+      updateListNameStmt.run(nextName, row.id);
     }
-  })
-);
+  });
+
+  txn(toUpdate);
+  return toUpdate.length;
+}
+
+function migratePlaintextBookmarks(dataKey) {
+  const rows = listRawBookmarksStmt.all();
+  const toUpdate = rows.filter(
+    (row) =>
+      !isEncryptedValue(row.url) ||
+      !isEncryptedValue(row.title) ||
+      !isEncryptedValue(row.favicon) ||
+      !isEncryptedValue(row.tags) ||
+      !isEncryptedValue(row.createdAt)
+  );
+
+  if (!toUpdate.length) return 0;
+
+  const txn = db.transaction((items) => {
+    for (const row of items) {
+      const nextUrl = isEncryptedValue(row.url) ? row.url : encryptText(row.url, dataKey);
+      const nextTitle = isEncryptedValue(row.title) ? row.title : encryptText(row.title, dataKey);
+      const nextFavicon = isEncryptedValue(row.favicon) ? row.favicon : encryptText(row.favicon, dataKey);
+      const nextTags = isEncryptedValue(row.tags) ? row.tags : encryptText(row.tags, dataKey);
+      const nextCreatedAt = isEncryptedValue(row.createdAt)
+        ? row.createdAt
+        : encryptText(row.createdAt, dataKey);
+      updateBookmarkFieldsStmt.run(nextUrl, nextTitle, nextFavicon, nextTags, nextCreatedAt, row.id);
+    }
+  });
+
+  txn(toUpdate);
+  return toUpdate.length;
+}
+
+function migratePlaintextData(dataKey) {
+  return migratePlaintextLists(dataKey) + migratePlaintextBookmarks(dataKey);
+}
+
+function getSessionDataKey(req) {
+  const encoded = req.session && req.session.dataKey;
+  if (!encoded) return null;
+  try {
+    const parsed = b64Decode(encoded);
+    return parsed.length === DATA_KEY_LENGTH ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function setAuthenticatedSession(req, dataKey) {
+  req.session.authenticated = true;
+  req.session.dataKey = b64Encode(dataKey);
+}
+
+function clearSessionAuth(req) {
+  if (!req.session) return;
+  delete req.session.authenticated;
+  delete req.session.dataKey;
+}
+
+function getAuthConfig() {
+  return getAuthConfigStmt.get() || null;
+}
 
 function requireAuth(req, res, next) {
   if (req.session && req.session.authenticated) {
-    return next();
+    const dataKey = getSessionDataKey(req);
+    if (dataKey) {
+      req.dataKey = dataKey;
+      return next();
+    }
   }
-  res.status(401).json({ error: "Unauthorized" });
+  return res.status(401).json({ error: "Unauthorized" });
 }
 
 function normalizeTags(tagsRaw) {
@@ -200,27 +396,94 @@ async function fetchBookmarkMetadata(rawUrl) {
   };
 }
 
-app.post("/api/login", (req, res) => {
-  const { password } = req.body;
-  if (password === APP_PASSWORD) {
-    req.session.authenticated = true;
-    return res.json({ ok: true });
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+if (IS_PRODUCTION) {
+  app.set("trust proxy", 1);
+}
+
+app.use(
+  session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: IS_PRODUCTION,
+      maxAge: 1000 * 60 * 60 * 12
+    }
+  })
+);
+
+app.post("/api/setup", (req, res) => {
+  if (getAuthConfig()) {
+    return res.status(409).json({ error: "Password is already configured" });
   }
-  return res.status(401).json({ error: "Invalid password" });
+
+  const password = String(req.body.password || "");
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters` });
+  }
+
+  const record = createPasswordRecord(password);
+  const now = new Date().toISOString();
+
+  try {
+    insertAuthConfigStmt.run({
+      ...record,
+      createdAt: now,
+      updatedAt: now
+    });
+  } catch {
+    return res.status(500).json({ error: "Could not save password" });
+  }
+
+  const dataKey = deriveDataKey(password, record.encryptionSalt);
+  const migrated = migratePlaintextData(dataKey);
+  setAuthenticatedSession(req, dataKey);
+  return res.status(201).json({ ok: true, migrated });
+});
+
+app.post("/api/login", (req, res) => {
+  const authConfig = getAuthConfig();
+  if (!authConfig) {
+    return res.status(409).json({ error: "Setup required" });
+  }
+
+  const password = String(req.body.password || "");
+  if (!verifyPassword(password, authConfig)) {
+    return res.status(401).json({ error: "Invalid password" });
+  }
+
+  const dataKey = deriveDataKey(password, authConfig.encryptionSalt);
+  const migrated = migratePlaintextData(dataKey);
+  setAuthenticatedSession(req, dataKey);
+  return res.json({ ok: true, migrated });
 });
 
 app.post("/api/logout", (req, res) => {
+  clearSessionAuth(req);
   req.session.destroy(() => {
     res.json({ ok: true });
   });
 });
 
 app.get("/api/session", (req, res) => {
-  res.json({ authenticated: Boolean(req.session && req.session.authenticated) });
+  const setupRequired = !getAuthConfig();
+  const dataKey = getSessionDataKey(req);
+  const authenticated = Boolean(req.session && req.session.authenticated && dataKey);
+  res.json({ authenticated, setupRequired });
 });
 
 app.get("/api/lists", requireAuth, (req, res) => {
-  res.json({ lists: listListsStmt.all() });
+  try {
+    const lists = listListsStmt.all().map((row) => decryptListRow(row, req.dataKey));
+    return res.json({ lists });
+  } catch {
+    return res.status(500).json({ error: "Could not decrypt lists" });
+  }
 });
 
 app.post("/api/lists", requireAuth, (req, res) => {
@@ -234,9 +497,14 @@ app.post("/api/lists", requireAuth, (req, res) => {
   }
 
   try {
+    const existingLists = listListsStmt.all().map((row) => decryptListRow(row, req.dataKey));
+    if (existingLists.some((list) => list.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ error: "List already exists" });
+    }
+
     const maxPos = getMaxListPositionStmt.get().maxPos;
-    const result = insertListStmt.run(name, maxPos + 1);
-    const list = getListStmt.get(result.lastInsertRowid);
+    const result = insertListStmt.run(encryptText(name, req.dataKey), maxPos + 1);
+    const list = decryptListRow(getListStmt.get(result.lastInsertRowid), req.dataKey);
     return res.status(201).json({ list });
   } catch (error) {
     if (String(error.message).includes("UNIQUE")) {
@@ -251,7 +519,12 @@ app.get("/api/bookmarks", requireAuth, (req, res) => {
   const listIdFilter = Number(req.query.listId || 0);
   const favoritesOnly = String(req.query.favorites || "") === "1";
 
-  let items = listBookmarksStmt.all();
+  let items;
+  try {
+    items = listBookmarksStmt.all().map((row) => decryptBookmarkRow(row, req.dataKey));
+  } catch {
+    return res.status(500).json({ error: "Could not decrypt bookmarks" });
+  }
 
   if (favoritesOnly) {
     items = items.filter((b) => Boolean(b.isFavorite));
@@ -270,7 +543,7 @@ app.get("/api/bookmarks", requireAuth, (req, res) => {
     );
   }
 
-  res.json({ bookmarks: items });
+  return res.json({ bookmarks: items });
 });
 
 app.post("/api/bookmarks", requireAuth, async (req, res) => {
@@ -290,21 +563,21 @@ app.post("/api/bookmarks", requireAuth, async (req, res) => {
     const max = getMaxPositionByListStmt.get(requestedListId).maxPos;
 
     const bookmark = {
-      url: metadata.url,
-      title: metadata.title,
-      favicon: metadata.favicon,
-      tags: normalizeTags(tags),
+      url: encryptText(metadata.url, req.dataKey),
+      title: encryptText(metadata.title, req.dataKey),
+      favicon: encryptText(metadata.favicon, req.dataKey),
+      tags: encryptText(normalizeTags(tags), req.dataKey),
       isFavorite: 0,
       position: max + 1,
-      createdAt: new Date().toISOString(),
+      createdAt: encryptText(new Date().toISOString(), req.dataKey),
       listId: requestedListId
     };
 
     const result = insertBookmarkStmt.run(bookmark);
-    const inserted = getBookmarkStmt.get(result.lastInsertRowid);
-    res.status(201).json({ bookmark: inserted });
+    const inserted = decryptBookmarkRow(getBookmarkStmt.get(result.lastInsertRowid), req.dataKey);
+    return res.status(201).json({ bookmark: inserted });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Failed to add bookmark" });
+    return res.status(400).json({ error: error.message || "Failed to add bookmark" });
   }
 });
 
@@ -317,8 +590,8 @@ app.patch("/api/bookmarks/:id/favorite", requireAuth, (req, res) => {
 
   const nextVal = existing.isFavorite ? 0 : 1;
   updateFavoriteStmt.run(nextVal, id);
-  const updated = getBookmarkStmt.get(id);
-  res.json({ bookmark: updated });
+  const updated = decryptBookmarkRow(getBookmarkStmt.get(id), req.dataKey);
+  return res.json({ bookmark: updated });
 });
 
 app.patch("/api/bookmarks/:id/tags", requireAuth, (req, res) => {
@@ -329,9 +602,9 @@ app.patch("/api/bookmarks/:id/tags", requireAuth, (req, res) => {
   }
 
   const tags = normalizeTags(req.body.tags);
-  updateTagsStmt.run(tags, id);
-  const updated = getBookmarkStmt.get(id);
-  res.json({ bookmark: updated });
+  updateTagsStmt.run(encryptText(tags, req.dataKey), id);
+  const updated = decryptBookmarkRow(getBookmarkStmt.get(id), req.dataKey);
+  return res.json({ bookmark: updated });
 });
 
 app.patch("/api/bookmarks/:id/list", requireAuth, (req, res) => {
@@ -348,7 +621,7 @@ app.patch("/api/bookmarks/:id/list", requireAuth, (req, res) => {
   }
 
   if (existing.listId === listId) {
-    return res.json({ bookmark: existing, unchanged: true });
+    return res.json({ bookmark: decryptBookmarkRow(existing, req.dataKey), unchanged: true });
   }
 
   const txn = db.transaction(() => {
@@ -358,8 +631,8 @@ app.patch("/api/bookmarks/:id/list", requireAuth, (req, res) => {
   });
 
   txn();
-  const updated = getBookmarkStmt.get(id);
-  res.json({ bookmark: updated });
+  const updated = decryptBookmarkRow(getBookmarkStmt.get(id), req.dataKey);
+  return res.json({ bookmark: updated });
 });
 
 app.patch("/api/bookmarks/:id/move", requireAuth, (req, res) => {
@@ -383,7 +656,7 @@ app.patch("/api/bookmarks/:id/move", requireAuth, (req, res) => {
 
   const targetIndex = direction === "up" ? index - 1 : index + 1;
   if (targetIndex < 0 || targetIndex >= siblings.length) {
-    return res.json({ bookmark: existing, unchanged: true });
+    return res.json({ bookmark: decryptBookmarkRow(existing, req.dataKey), unchanged: true });
   }
 
   const target = siblings[targetIndex];
@@ -394,8 +667,8 @@ app.patch("/api/bookmarks/:id/move", requireAuth, (req, res) => {
   });
 
   txn();
-  const updated = getBookmarkStmt.get(id);
-  res.json({ bookmark: updated });
+  const updated = decryptBookmarkRow(getBookmarkStmt.get(id), req.dataKey);
+  return res.json({ bookmark: updated });
 });
 
 app.delete("/api/bookmarks/:id", requireAuth, (req, res) => {
@@ -411,7 +684,7 @@ app.delete("/api/bookmarks/:id", requireAuth, (req, res) => {
   });
 
   txn();
-  res.json({ ok: true });
+  return res.json({ ok: true });
 });
 
 app.use(express.static(path.join(__dirname, "public")));

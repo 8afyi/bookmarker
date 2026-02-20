@@ -5,7 +5,6 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - APP_PASSWORD=${APP_PASSWORD}
       - SESSION_SECRET=${SESSION_SECRET}
       - DB_PATH=/data/bookmarks.db
       - PORT=3000
