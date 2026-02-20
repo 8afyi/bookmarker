@@ -1,5 +1,7 @@
 ![Screen shot](bookmarker.png)
 
+Note: this app is intended for single-user/self-hosted usage. I would not recommend putting this on the WAN without extensive testing.  
+
 ## Run
 
 1. Create env file:
@@ -32,21 +34,4 @@
 - `FETCH_TIMEOUT_MS`: timeout for bookmark metadata fetch requests.
 - `FETCH_BLOCK_PRIVATE_IPS`: set `true` to block private/loopback hosts during metadata fetch.
 
-## Security Model
 
-- The app no longer stores an app password in `.env`.
-- The master password is stored as a salted `scrypt` hash in SQLite.
-- List names and bookmark fields (`url`, `title`, `favicon`, `tags`, `created_at`) are encrypted at rest with `AES-256-GCM`.
-- The encryption key is derived from the password at login and kept only in server memory/session.
-- Existing plaintext list/bookmark rows are automatically encrypted after first successful setup/login.
-- Login endpoint now includes per-IP rate limiting and lockout controls.
-- Metadata fetches support timeout and private-network blocking controls.
-
-## Practical Hardening
-
-- Keep `.env` readable only by your user (example: `chmod 600 .env`).
-- Keep the `data/` volume private to the host user.
-- Use full-disk encryption on the host.
-- If exposing beyond localhost, put the app behind HTTPS.
-
-This app is intended for single-user/self-hosted usage.
